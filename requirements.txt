@@ -1,0 +1,56 @@
+# ── Core API ────────────────────────────────────────────────────────────────
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9        # required for UploadFile / Form
+
+# ── ML / GPU ─────────────────────────────────────────────────────────────────
+# Install the correct torch build for your CUDA version from https://pytorch.org/
+# e.g. for CUDA 12.1:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+torch>=2.1.0
+torchvision>=0.16.0
+
+# ── HuggingFace ──────────────────────────────────────────────────────────────
+huggingface_hub>=0.22.0
+diffusers>=0.27.0
+transformers>=4.40.0
+accelerate>=0.29.0
+safetensors>=0.4.3
+
+# ── Image processing ─────────────────────────────────────────────────────────
+Pillow>=10.3.0
+numpy>=1.26.0
+rembg>=2.0.57                  # background removal for TripoSR (use rembg[gpu] only if onnxruntime-gpu wheel is available for your platform)
+opencv-python-headless>=4.9.0
+
+# ── 3-D mesh ─────────────────────────────────────────────────────────────────
+trimesh>=4.3.0                 # mesh I/O (.obj export)
+# pymeshlab>=2023.12           # optional heavy dep — install separately only if needed
+
+# ── Config / utilities ───────────────────────────────────────────────────────
+omegaconf>=2.3.0
+einops>=0.7.0
+tqdm>=4.66.0
+GitPython>=3.1.41              # optional: programmatic git clone fallback
+
+# ── Model-specific extras (install separately as needed) ─────────────────────
+# TripoSR:
+#   pip install git+https://github.com/VAST-AI-Research/TripoSR.git
+#   (installs the `tsr` package from the GitHub repo)
+#
+# CRM:
+#   The GitHub repo (repos/CRM/) is auto-cloned by the service on first use.
+#   Additional deps from its requirements.txt may need to be installed manually.
+#
+# Wonder3D:
+#   pip install git+https://github.com/xxlong0/Wonder3D.git  (optional)
+#   OR the cloned repo (repos/Wonder3D/) is added to sys.path automatically.
+#   Required: `instant-nsr-pl` for mesh reconstruction step.
+#
+# InstantMesh:
+#   The GitHub repo (repos/InstantMesh/) is auto-cloned.
+#   Required extras: `einops`, `xformers` (optional but speeds up attention).
+#
+# LAM:
+#   The GitHub repo (repos/LAM/) is auto-cloned.
+#   May require additional deps listed in repos/LAM/requirements.txt.
