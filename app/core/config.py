@@ -9,10 +9,11 @@ from pathlib import Path
 class Settings:
     # Resolved relative to this file: app/core/ → app/ → project root
     BASE_DIR: Path = Path(__file__).parent.parent.parent
+    DATA_DIR: Path = "/data"
 
-    MODEL_CACHE_DIR: Path =  "/data/model_cache"
+    MODEL_CACHE_DIR: Path = DATA_DIR / "model_cache"
     REPOS_DIR: Path       = BASE_DIR / "repos"
-    OUTPUT_DIR: Path      =  "/data/outputs"
+    OUTPUT_DIR: Path      = DATA_DIR / "outputs"
 
     MAX_IMAGE_SIZE_MB: int        = 50
     MAX_JOB_TIMEOUT_SECONDS: int  = 1800   # 30 min
