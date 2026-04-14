@@ -55,6 +55,14 @@ class GenerationError(Exception):
     """Raised when model inference fails."""
 
 
+class ModelEnvironmentError(Exception):
+    """Host cannot satisfy hardware / runtime needs for a model (e.g. CUDA-only)."""
+
+    def __init__(self, model_name: str, detail: str) -> None:
+        super().__init__(detail)
+        self.model_name = model_name
+
+
 # ---------------------------------------------------------------------------
 # HTTP exception handlers
 # ---------------------------------------------------------------------------
@@ -85,3 +93,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(GenerationError)
     async def _generation_error(_: Request, exc: GenerationError):
         return JSONResponse(status_code=500, content={"detail": str(exc)})
+
+    @app.exception_handler(ModelEnvironmentError)
+    async def _model_environment(_: Request, exc: ModelEnvironmentError):
+        return JSONResponse(status_code=503, content={"detail": str(exc)})

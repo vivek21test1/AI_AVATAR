@@ -48,6 +48,7 @@ MODEL_REGISTRY: dict[str, dict] = {
         "github_repo": "https://github.com/thu-ml/CRM.git",
         "repo_dir": str(settings.REPOS_DIR / "CRM"),
         "key_files": [],
+        "requires_cuda": True,
         "vram_gb": 8,
         "output_format": "obj",
         "description": "Single image → Full textured 3D mesh in ~10 s",

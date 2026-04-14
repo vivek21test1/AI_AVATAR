@@ -15,7 +15,12 @@ import tempfile
 from pathlib import Path
 
 from app.core.config import settings
-from app.core.exceptions import ModelNotDownloadedError, ModelNotFoundError
+from app.core.exceptions import (
+    ModelEnvironmentError,
+    ModelNotDownloadedError,
+    ModelNotFoundError,
+)
+from app.core.registry import MODEL_REGISTRY
 from app.repositories.model_repository import ModelRepository
 from app.schemas.job_schema import JobResponse
 from app.services.job_service import JobService
@@ -65,6 +70,24 @@ class GenerationService:
     def _validate_model(self, model_name: str, auto_download: bool) -> None:
         if not self._model_repo.exists(model_name):
             raise ModelNotFoundError(model_name)
+
+        cfg = MODEL_REGISTRY.get(model_name) or {}
+        if cfg.get("requires_cuda"):
+            try:
+                import torch
+            except ImportError as exc:
+                raise ModelEnvironmentError(
+                    model_name,
+                    "PyTorch is not installed; CUDA-only models cannot run.",
+                ) from exc
+            if not torch.cuda.is_available():
+                raise ModelEnvironmentError(
+                    model_name,
+                    f"Model '{model_name}' requires an NVIDIA GPU and a CUDA-enabled PyTorch "
+                    f"build (torch.cuda.is_available() is False; torch {torch.__version__}). "
+                    "Install a CUDA wheel from https://pytorch.org matching your driver, "
+                    "or use another model such as 'triposr' on CPU.",
+                )
 
         if not self._model_repo.is_ready(model_name):
             if not auto_download:

@@ -84,9 +84,17 @@ class CRMModel(BaseAvatarModel):
 
     def load(self) -> None:
         if self.device != "cuda":
+            try:
+                import torch
+                tv = torch.__version__
+                cuda_ok = torch.cuda.is_available()
+            except ImportError:
+                tv, cuda_ok = "(not installed)", False
             raise RuntimeError(
-                "CRM requires CUDA: mesh extraction uses nvdiffrast "
-                "(RasterizeCudaContext). CPU/MPS are not supported."
+                "CRM must run with device='cuda': mesh extraction uses nvdiffrast "
+                "(RasterizeCudaContext). This process resolved the device to "
+                f"{self.device!r} (torch {tv}, cuda_available={cuda_ok}). "
+                "Use a GPU host with CUDA PyTorch, or pick another model."
             )
 
         import torch
