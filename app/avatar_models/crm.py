@@ -17,6 +17,7 @@ Weights (HF snapshot in model_cache/crm/ or hf_hub_download):
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import json
 import os
 import re
@@ -29,6 +30,25 @@ import numpy as np
 from PIL import Image
 
 from app.avatar_models.base import BaseAvatarModel
+
+
+def _load_repo_script(repo: Path, relative_py: str, module_name: str):
+    """
+    Load a single ``*.py`` from the CRM clone as an isolated module name.
+
+    Avoids shadowing PyPI packages named ``inference``, ``model``, ``pipelines``, …
+    which would otherwise win on ``sys.path`` or sit in ``sys.modules``.
+    """
+    path = repo / relative_py
+    if not path.is_file():
+        raise FileNotFoundError(f"CRM repo missing {relative_py}: {path}")
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot build import spec for {path}")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
 
 @contextlib.contextmanager
@@ -48,10 +68,14 @@ class CRMModel(BaseAvatarModel):
         self.repo_dir = Path(repo_dir)
         self._pipeline = None
         self._crm_model = None
+        self._generate3d = None
+        self._preprocess_image = None
 
     def unload(self) -> None:
         self._pipeline = None
         self._crm_model = None
+        self._generate3d = None
+        self._preprocess_image = None
         super().unload()
 
     # ------------------------------------------------------------------
@@ -108,8 +132,14 @@ class CRMModel(BaseAvatarModel):
 
         specs = json.loads(specs_path.read_text(encoding="utf-8"))
 
-        from model import CRM  # noqa: PLC0415
-        from pipelines import TwoStagePipeline  # noqa: PLC0415
+        model_mod = _load_repo_script(repo, "model.py", "ai_avatar_thuml_crm_model")
+        CRM = model_mod.CRM
+        pipe_mod = _load_repo_script(repo, "pipelines.py", "ai_avatar_thuml_crm_pipelines")
+        TwoStagePipeline = pipe_mod.TwoStagePipeline
+        self._preprocess_image = pipe_mod.preprocess_image
+
+        inf_mod = _load_repo_script(repo, "inference.py", "ai_avatar_thuml_crm_inference")
+        self._generate3d = inf_mod.generate3d
 
         with _chdir(repo):
             stage1_root = OmegaConf.load(stage1_yaml).config
@@ -144,9 +174,6 @@ class CRMModel(BaseAvatarModel):
     # ------------------------------------------------------------------
 
     def generate(self, image_path: str, output_dir: str, **kwargs) -> dict:
-        from inference import generate3d  # noqa: PLC0415
-        from pipelines import preprocess_image  # noqa: PLC0415
-
         self.ensure_loaded()
 
         out = Path(output_dir)
@@ -160,7 +187,7 @@ class CRMModel(BaseAvatarModel):
         repo = self.repo_dir.resolve()
 
         with _chdir(repo):
-            img_rgb = preprocess_image(
+            img_rgb = self._preprocess_image(
                 image,
                 "Auto Remove background",
                 1.0,
@@ -183,7 +210,7 @@ class CRMModel(BaseAvatarModel):
                 axis=1,
             )
 
-            glb_path, obj_zip_path = generate3d(
+            glb_path, obj_zip_path = self._generate3d(
                 self._crm_model, np_imgs, np_xyzs, self.device
             )
 
