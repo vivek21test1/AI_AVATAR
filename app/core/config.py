@@ -9,7 +9,7 @@ from pathlib import Path
 class Settings:
     # Resolved relative to this file: app/core/ → app/ → project root
     BASE_DIR: Path = Path(__file__).parent.parent.parent
-    DATA_DIR: Path = "/data"
+    DATA_DIR: Path = Path("/data")
 
     MODEL_CACHE_DIR: Path = DATA_DIR / "model_cache"
     REPOS_DIR: Path       = BASE_DIR / "repos"
