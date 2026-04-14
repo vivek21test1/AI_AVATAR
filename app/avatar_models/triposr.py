@@ -80,11 +80,14 @@ class TripoSRModel(BaseAvatarModel):
             bg.paste(image)
 
         resolution: int = kwargs.get("resolution", 256)
+        has_vertex_color: bool = kwargs.get("has_vertex_color", True)
 
         with torch.no_grad():
             scene_codes = self._model([bg], device=self.device)
 
-        meshes = self._model.extract_mesh(scene_codes, resolution=resolution)
+        meshes = self._model.extract_mesh(
+            scene_codes, has_vertex_color, resolution=resolution
+        )
 
         obj_path = str(out / "mesh.obj")
         meshes[0].export(obj_path)
