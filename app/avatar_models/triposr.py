@@ -3,7 +3,7 @@ TripoSR model wrapper.
 
 HF repo : stabilityai/TripoSR
 VRAM    : 6 GB   |  License: MIT  |  Commercial: Yes
-Output  : Textured 3D mesh (.obj) in ~0.5 s
+Output  : mesh.obj + PNG previews (conditioning image + optional multi-view renders)
 
 The `tsr` package must be installed:
     pip install git+https://github.com/VAST-AI-Research/TripoSR.git
@@ -81,21 +81,50 @@ class TripoSRModel(BaseAvatarModel):
 
         resolution: int = kwargs.get("resolution", 256)
         has_vertex_color: bool = kwargs.get("has_vertex_color", True)
+        preview_n_views: int = int(kwargs.get("preview_n_views", 6))
+        preview_size: int = int(kwargs.get("preview_size", 512))
 
         with torch.no_grad():
             scene_codes = self._model([bg], device=self.device)
+
+        input_preview_path = out / "input_preview.png"
+        bg.save(input_preview_path)
+        written: list[Path] = [input_preview_path]
+
+        if preview_n_views > 0:
+            try:
+                with torch.no_grad():
+                    render_batches = self._model.render(
+                        scene_codes,
+                        n_views=preview_n_views,
+                        height=preview_size,
+                        width=preview_size,
+                    )
+                for i, pil_img in enumerate(render_batches[0]):
+                    rp = out / f"render_{i:02d}.png"
+                    pil_img.save(rp)
+                    written.append(rp)
+            except Exception:
+                self.logger.exception("TripoSR multi-view render failed; ZIP will still include input_preview.png")
 
         meshes = self._model.extract_mesh(
             scene_codes, has_vertex_color, resolution=resolution
         )
 
-        obj_path = str(out / "mesh.obj")
-        meshes[0].export(obj_path)
+        obj_path = out / "mesh.obj"
+        meshes[0].export(str(obj_path))
+        written.append(obj_path)
+
+        output_files = [str(p) for p in sorted(written, key=lambda p: p.name)]
 
         return {
-            "output_files": [str(p) for p in out.iterdir() if p.is_file()],
+            "output_files": output_files,
             "output_format": "obj",
-            "metadata": {"resolution": resolution},
+            "metadata": {
+                "resolution": resolution,
+                "preview_n_views": preview_n_views,
+                "preview_size": preview_size,
+            },
         }
 
     # ------------------------------------------------------------------

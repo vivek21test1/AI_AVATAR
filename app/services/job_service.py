@@ -9,10 +9,10 @@ Responsibilities:
 """
 
 import logging
+import shutil
 import threading
 import zipfile
 from pathlib import Path
-from typing import Optional
 
 from app.core.config import settings
 from app.core.exceptions import (
@@ -143,6 +143,9 @@ class JobService:
             )
 
             output_files: list[str] = result.get("output_files", [])
+            output_files = self._output_files_with_source_image(
+                out_dir, entity.image_path, output_files
+            )
             update(output_files=output_files, progress=0.85, message="Packaging output …")
 
             # ── Step 3: ZIP results ─────────────────────────────────────
@@ -162,6 +165,40 @@ class JobService:
         except Exception as exc:
             logger.exception(f"Job {job_id} failed")
             update(status=JobStatus.FAILED, error=str(exc), message="Job failed")
+
+    # ------------------------------------------------------------------
+    # Packaging helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _output_files_with_source_image(
+        out_dir: Path,
+        image_path: str,
+        output_files: list[str],
+    ) -> list[str]:
+        """
+        Copy the API upload into the job output dir as ``uploaded_input.*`` and
+        ensure that path is listed first so every result ZIP contains the source image.
+        """
+        src = Path(image_path)
+        if not src.is_file():
+            logger.warning("Source image not found at %s — ZIP will omit uploaded_input", image_path)
+            return list(output_files)
+
+        ext = src.suffix.lower() if src.suffix else ".dat"
+        dest = out_dir / f"uploaded_input{ext}"
+        shutil.copy2(src, dest)
+        dest_str = str(dest.resolve())
+
+        merged: list[str] = [dest_str]
+        for fp in output_files:
+            try:
+                if Path(fp).resolve() == dest.resolve():
+                    continue
+            except OSError:
+                pass
+            merged.append(fp)
+        return merged
 
     # ------------------------------------------------------------------
     # Mapping helper

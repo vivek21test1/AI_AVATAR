@@ -45,6 +45,8 @@ class BaseAvatarModel(ABC):
         -------
         dict:
           output_files : list[str]  – absolute paths to all generated files
+                                      (JobService always prepends a copy of the
+                                      upload as ``uploaded_input.*`` in the ZIP.)
           output_format : str       – "obj", "png", or "ply"
           metadata : dict           – optional extra info
         """
