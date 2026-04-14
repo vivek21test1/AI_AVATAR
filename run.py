@@ -3,7 +3,7 @@ Entry point — run with:
 
     python run.py
     # or
-    uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
 """
 
 import uvicorn
@@ -12,7 +12,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
-        port=8000,
+        port=8080,
         reload=True,
         log_level="info",
     )
