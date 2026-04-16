@@ -12,6 +12,7 @@ views, then optionally reconstructs a mesh via NeuS (instant-nsr-pl).
 
 import sys
 from pathlib import Path
+from typing import List, Optional
 
 from PIL import Image
 
@@ -83,7 +84,7 @@ class Wonder3DModel(BaseAvatarModel):
             output_type="pil",
         )
 
-        output_files: list[str] = []
+        output_files: List[str] = []
         for i, img in enumerate(result.images):
             p = str(out / f"view_{i:02d}.png")
             img.save(p)
@@ -104,7 +105,7 @@ class Wonder3DModel(BaseAvatarModel):
     # Mesh reconstruction
     # ------------------------------------------------------------------
 
-    def _try_reconstruct_mesh(self, view_paths: list[str], out: Path) -> str | None:
+    def _try_reconstruct_mesh(self, view_paths: List[str], out: Path) -> Optional[str]:
         try:
             from instant_nsr_pl.run import reconstruct_from_views  # noqa: PLC0415
 

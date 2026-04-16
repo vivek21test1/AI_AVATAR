@@ -100,8 +100,9 @@ async def generate_sync(
     )
 
     # Poll until the background thread finishes (max 30 min)
-    deadline = asyncio.get_event_loop().time() + settings.MAX_JOB_TIMEOUT_SECONDS
-    while asyncio.get_event_loop().time() < deadline:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + settings.MAX_JOB_TIMEOUT_SECONDS
+    while loop.time() < deadline:
         await asyncio.sleep(2)
         current = job_service.get(job.job_id)
         if current.status in (JobStatus.COMPLETED, JobStatus.FAILED):

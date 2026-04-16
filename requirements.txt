@@ -1,56 +1,84 @@
-# ── Core API ────────────────────────────────────────────────────────────────
+# ── Core API ──────────────────────────────────────────────────────────────────
 fastapi>=0.110.0
-uvicorn[standard]>=0.29.0
-python-multipart>=0.0.9        # required for UploadFile / Form
+uvicorn[standard]>=0.29.0          # includes websockets + httptools
+python-multipart>=0.0.9            # required for UploadFile / Form
+pydantic>=2.0.0
+typing_extensions>=4.8.0           # backports used by pydantic/fastapi on Py 3.9
 
-# ── ML / GPU ─────────────────────────────────────────────────────────────────
-# Install the correct torch build for your CUDA version from https://pytorch.org/
-# e.g. for CUDA 12.1:
+# ── ML / GPU ──────────────────────────────────────────────────────────────────
+# IMPORTANT: Install the correct torch build for your CUDA version BEFORE
+# running `pip install -r requirements.txt`.
+#
+# CPU-only (no GPU):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#
+# CUDA 11.8:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+#
+# CUDA 12.1:
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#
+# CUDA 12.4 (Red Hat 9 default driver):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#
+# If torch is already installed by the commands above, pip will skip it here.
 torch>=2.1.0
 torchvision>=0.16.0
 
-# ── HuggingFace ──────────────────────────────────────────────────────────────
+# ── HuggingFace ecosystem ──────────────────────────────────────────────────────
 huggingface_hub>=0.22.0
 diffusers>=0.27.0
 transformers>=4.40.0
 accelerate>=0.29.0
 safetensors>=0.4.3
 
-# ── Image processing ─────────────────────────────────────────────────────────
+# ── Image processing ──────────────────────────────────────────────────────────
 Pillow>=10.3.0
 numpy>=1.26.0
-rembg>=2.0.57                  # background removal for TripoSR (use rembg[gpu] only if onnxruntime-gpu wheel is available for your platform)
+# onnxruntime is required by rembg for background removal (TripoSR model).
+# On a GPU host with CUDA you can swap this for:
+#   onnxruntime-gpu>=1.17.0
+onnxruntime>=1.17.0
+rembg>=2.0.57
+# Headless variant — no display/Qt needed (correct for server/VM deployments)
 opencv-python-headless>=4.9.0
+scipy>=1.12.0
+scikit-image>=0.22.0
+imageio>=2.34.0                    # used by trimesh and some diffuser pipelines
 
-# ── 3-D mesh ─────────────────────────────────────────────────────────────────
-trimesh>=4.3.0                 # mesh I/O (.obj export)
-# pymeshlab>=2023.12           # optional heavy dep — install separately only if needed
+# ── 3-D mesh ──────────────────────────────────────────────────────────────────
+trimesh>=4.3.0                     # mesh I/O: .obj export, .ply read
 
-# ── Config / utilities ───────────────────────────────────────────────────────
-omegaconf>=2.3.0
-einops>=0.7.0
-tqdm>=4.66.0
-GitPython>=3.1.41              # optional: programmatic git clone fallback
+# ── Config / utilities ────────────────────────────────────────────────────────
+omegaconf>=2.3.0                   # YAML config loading (Wonder3D, CRM, InstantMesh)
+einops>=0.7.0                      # tensor manipulation in diffusion models
+tqdm>=4.66.0                       # progress bars
+requests>=2.31.0                   # used by huggingface_hub
+filelock>=3.13.0                   # used by huggingface_hub / transformers
+packaging>=23.0                    # version parsing used by many ML libs
+pooch>=1.8.0                       # model file download helper used by rembg
 
-# ── Model-specific extras (install separately as needed) ─────────────────────
-# TripoSR:
-#   pip install git+https://github.com/VAST-AI-Research/TripoSR.git
-#   (installs the `tsr` package from the GitHub repo)
+# ── Model-specific extras ─────────────────────────────────────────────────────
+# TripoSR (single image → .obj in ~0.5 s):
+#   Requires the `tsr` package from the GitHub source.  Install once:
+#     pip install git+https://github.com/VAST-AI-Research/TripoSR.git
+#   The system git binary must be present: `sudo dnf install git`
 #
-# CRM:
-#   The GitHub repo (repos/CRM/) is auto-cloned by the service on first use.
-#   Additional deps from its requirements.txt may need to be installed manually.
+# CRM (CUDA-only, 8 GB VRAM):
+#   Auto-cloned on first use into repos/CRM/.
+#   Also requires nvdiffrast (CUDA rasteriser):
+#     pip install git+https://github.com/NVlabs/nvdiffrast.git
 #
-# Wonder3D:
-#   pip install git+https://github.com/xxlong0/Wonder3D.git  (optional)
-#   OR the cloned repo (repos/Wonder3D/) is added to sys.path automatically.
-#   Required: `instant-nsr-pl` for mesh reconstruction step.
+# Wonder3D (8 GB VRAM):
+#   Auto-cloned on first use into repos/Wonder3D/.
+#   Optional mesh reconstruction:
+#     pip install git+https://github.com/xxlong0/Wonder3D.git
 #
-# InstantMesh:
-#   The GitHub repo (repos/InstantMesh/) is auto-cloned.
-#   Required extras: `einops`, `xformers` (optional but speeds up attention).
+# InstantMesh (16 GB VRAM):
+#   Auto-cloned on first use into repos/InstantMesh/.
+#   Optional speedup:
+#     pip install xformers
 #
-# LAM:
-#   The GitHub repo (repos/LAM/) is auto-cloned.
-#   May require additional deps listed in repos/LAM/requirements.txt.
+# LAM (16 GB VRAM):
+#   Auto-cloned on first use into repos/LAM/.
+#   Check repos/LAM/requirements.txt for any additional deps after cloning.

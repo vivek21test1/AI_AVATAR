@@ -72,11 +72,19 @@ class JobService:
         if entity is None:
             raise JobNotFoundError(job_id)
 
-        # Remove output files from disk
-        for path in entity.output_files:
-            Path(path).unlink(missing_ok=True)
-        if entity.zip_path:
-            Path(entity.zip_path).unlink(missing_ok=True)
+        # Remove the entire job output directory (contains generated files,
+        # result.zip, and job_state.json) in one shot.
+        job_dir = settings.OUTPUT_DIR / job_id
+        if job_dir.is_dir():
+            shutil.rmtree(job_dir, ignore_errors=True)
+
+        # Remove the original upload temp file which lives directly in OUTPUT_DIR,
+        # not inside job_dir (it was copied into job_dir as uploaded_input.*).
+        if entity.image_path:
+            try:
+                Path(entity.image_path).unlink(missing_ok=True)
+            except OSError:
+                pass
 
         self._job_repo.delete(job_id)
 
