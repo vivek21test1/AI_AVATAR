@@ -48,6 +48,7 @@ imageio>=2.34.0                    # used by trimesh and some diffuser pipelines
 
 # ── 3-D mesh ──────────────────────────────────────────────────────────────────
 trimesh>=4.3.0                     # mesh I/O: .obj export, .ply read
+PyMCubes>=0.1.4                    # marching cubes mesh extraction used by TripoSR's tsr package
 
 # ── Config / utilities ────────────────────────────────────────────────────────
 omegaconf>=2.3.0                   # YAML config loading (Wonder3D, CRM, InstantMesh)
