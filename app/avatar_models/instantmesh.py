@@ -53,6 +53,13 @@ class InstantMeshModel(BaseAvatarModel):
         from diffusers import DiffusionPipeline, EulerAncestralDiscreteScheduler
         from omegaconf import OmegaConf
 
+        # ── Ensure the inference repo is cloned ───────────────────────
+        # pipeline_zero123plus.py lives inside repos/InstantMesh/zero123plus/.
+        # The download service clones the repo, but if that step was skipped
+        # or failed, clone it inline now so load() is self-contained.
+        if not (self.repo_dir / ".git").exists():
+            self._clone_repo()
+
         repo_str = str(self.repo_dir)
         if repo_str not in sys.path:
             sys.path.insert(0, repo_str)
@@ -157,6 +164,44 @@ class InstantMeshModel(BaseAvatarModel):
             "output_format": "obj",
             "metadata": {"mv_steps": mv_steps, "export_texmap": use_texmap},
         }
+
+    # ------------------------------------------------------------------
+    # Repo management
+    # ------------------------------------------------------------------
+
+    def _clone_repo(self) -> None:
+        """
+        Clone the TencentARC/InstantMesh GitHub repo to ``self.repo_dir``.
+        Called from ``load()`` when the repo directory is missing or incomplete
+        (no ``.git``).  This ensures ``zero123plus/pipeline_zero123plus.py``
+        and the ``src/`` inference utilities are available before loading.
+        """
+        import subprocess
+
+        github_url = "https://github.com/TencentARC/InstantMesh.git"
+        self.logger.info(
+            "InstantMesh repo not found — cloning %s to %s …",
+            github_url, self.repo_dir,
+        )
+        self.repo_dir.parent.mkdir(parents=True, exist_ok=True)
+
+        # Remove a stale/partial directory so git clone doesn't complain
+        if self.repo_dir.exists() and not (self.repo_dir / ".git").exists():
+            import shutil
+            shutil.rmtree(self.repo_dir, ignore_errors=True)
+
+        result = subprocess.run(
+            ["git", "clone", "--depth=1", github_url, str(self.repo_dir)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Failed to clone InstantMesh repo from {github_url}:\n"
+                f"{result.stderr}\n"
+                f"Ensure git is installed and the server can reach GitHub."
+            )
+        self.logger.info("InstantMesh repo cloned → %s", self.repo_dir)
 
     # ------------------------------------------------------------------
     # Zero123++ resolution
