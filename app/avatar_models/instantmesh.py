@@ -274,46 +274,85 @@ class InstantMeshModel(BaseAvatarModel):
             self.logger.info("Found pipeline_zero123plus.py in weights: %s", found)
             return str(found)
 
-        # ── Try downloading from HuggingFace (needs HF_TOKEN if gated) ─
+        # ── Try HuggingFace: download all .py files and search them ────
+        # hf_hub_download for the specific filename returns 404 because the
+        # repo may have moved the file.  Download every .py file in the repo
+        # and look for the one that defines Zero123PlusPipeline.
         token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
         target = weights_dir / "pipeline_zero123plus.py"
-        try:
-            from huggingface_hub import hf_hub_download
 
-            self.logger.info(
-                "pipeline_zero123plus.py not found locally — "
-                "attempting HF download (sudo-ai/zero123plus) …"
-            )
-            hf_hub_download(
-                repo_id="sudo-ai/zero123plus",
-                filename="pipeline_zero123plus.py",
-                local_dir=str(target.parent),
-                local_dir_use_symlinks=False,
-                token=token,
-            )
-            if target.is_file():
-                self.logger.info("Downloaded pipeline_zero123plus.py → %s", target)
-                return str(target)
-        except Exception as exc:
-            token_hint = (
-                " (tip: set HF_TOKEN — the repo may require authentication)"
-                if token is None else ""
-            )
-            self.logger.warning(
-                "HF download of pipeline_zero123plus.py failed%s: %s",
-                token_hint, exc,
-            )
+        found_via_hf = self._fetch_pipeline_from_hf(target, token)
+        if found_via_hf:
+            return str(found_via_hf)
 
         # ── Nothing worked ─────────────────────────────────────────────
+        token_hint = " (export HF_TOKEN=<your_token>)" if not token else ""
         self.logger.warning(
-            "pipeline_zero123plus.py could not be found or downloaded. "
+            "pipeline_zero123plus.py could not be found or downloaded%s. "
             "Will attempt DiffusionPipeline.from_pretrained without custom_pipeline. "
-            "If that fails, fix:\n"
+            "If that fails:\n"
             "  1. Set HF_TOKEN and accept terms at "
             "https://huggingface.co/sudo-ai/zero123plus\n"
             "  2. Or: POST /api/v1/models/zero123plus/download first\n"
             "  3. Or: copy pipeline_zero123plus.py manually to %s",
-            target,
+            token_hint, target,
+        )
+        return None
+
+    def _fetch_pipeline_from_hf(
+        self, dest: Path, token: Optional[str]
+    ) -> Optional[Path]:
+        """
+        Download every ``.py`` file from ``sudo-ai/zero123plus`` and return the
+        path of the one that contains the Zero123PlusPipeline class definition,
+        saved as *dest*.
+
+        This is necessary because the file location inside the HF repo has
+        changed over time and a direct ``hf_hub_download("pipeline_zero123plus.py")``
+        returns 404 while the class still exists somewhere in the repo.
+
+        Returns the saved path on success, or None on any failure.
+        """
+        try:
+            from huggingface_hub import snapshot_download
+
+            py_cache = dest.parent / "_hf_py_cache"
+            self.logger.info(
+                "Scanning sudo-ai/zero123plus for Zero123++ pipeline code "
+                "(downloading .py files only) …"
+            )
+            snapshot_download(
+                repo_id="sudo-ai/zero123plus",
+                local_dir=str(py_cache),
+                local_dir_use_symlinks=False,
+                allow_patterns=["*.py"],
+                token=token,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Could not fetch .py files from sudo-ai/zero123plus: %s", exc
+            )
+            return None
+
+        # Search every .py file for the Zero123Plus pipeline class
+        import shutil
+        keywords = ("Zero123PlusPipeline", "class Zero123Plus", "zero123plus")
+        for py_file in sorted(Path(py_cache).rglob("*.py")):
+            try:
+                content = py_file.read_text(errors="ignore")
+                if any(kw in content for kw in keywords):
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(py_file, dest)
+                    self.logger.info(
+                        "Found pipeline code in %s → copied to %s", py_file, dest
+                    )
+                    return dest
+            except Exception:
+                continue
+
+        self.logger.warning(
+            "No Zero123Plus pipeline class found in any .py file from "
+            "sudo-ai/zero123plus."
         )
         return None
 
