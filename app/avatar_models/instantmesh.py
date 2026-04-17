@@ -162,9 +162,15 @@ class InstantMeshModel(BaseAvatarModel):
     # Zero123++ resolution
     # ------------------------------------------------------------------
 
-    def _resolve_zero123plus(self) -> Tuple[Path, Path]:
+    def _resolve_zero123plus(self) -> Tuple[Path, str]:
         """
-        Return (weights_dir, pipeline_py_file) for the Zero123++ stage.
+        Return ``(weights_dir, custom_pipeline)`` for the Zero123++ stage.
+
+        ``custom_pipeline`` is the value passed directly to
+        ``DiffusionPipeline.from_pretrained(custom_pipeline=...)``.
+        diffusers accepts either:
+          • An absolute path ending in ".py"  → loaded from local file
+          • A HuggingFace repo-id string      → pipeline class fetched from HF
 
         Weights search order
         --------------------
@@ -172,43 +178,50 @@ class InstantMeshModel(BaseAvatarModel):
         2. Any sub-dir of model_cache/instantmesh/ that has model_index.json
         3. Download sudo-ai/zero123plus-v1.1 into model_cache/instantmesh/zero123plus-v1.1/
 
-        Pipeline .py file search order
-        -------------------------------
-        diffusers recognises a local custom pipeline ONLY when custom_pipeline
-        is a path that ends in ".py" (not a directory).  We therefore resolve
-        to the actual pipeline_zero123plus.py file, trying:
-          A. repos/InstantMesh/zero123plus/pipeline_zero123plus.py  (preferred)
-          B. <weights_dir>/pipeline_zero123plus.py  (HF snapshot includes it)
-          C. Any pipeline_zero123plus.py anywhere under <weights_dir>
+        Pipeline .py file search order (local-first, HF repo-id fallback)
+        ------------------------------------------------------------------
+        A. repos/InstantMesh/zero123plus/pipeline_zero123plus.py
+        B. <weights_dir>/pipeline_zero123plus.py
+        C. model_cache/zero123plus/pipeline_zero123plus.py  (standalone model)
+        D. Recursive glob under <weights_dir>
+        E. HF repo-id "sudo-ai/zero123plus-v1.1"  (diffusers fetches & caches it)
         """
         from app.core.config import settings
 
         # ── locate weights ──────────────────────────────────────────
         weights_dir: Path = self._find_weights(settings)
 
-        # ── locate pipeline .py file ────────────────────────────────
-        candidates = [
+        # ── locate pipeline code ────────────────────────────────────
+        local_candidates = [
             self.repo_dir / "zero123plus" / "pipeline_zero123plus.py",
             weights_dir / "pipeline_zero123plus.py",
+            settings.MODEL_CACHE_DIR / "zero123plus" / "pipeline_zero123plus.py",
         ]
-        pipeline_py: Path = next((p for p in candidates if p.exists()), Path())
 
-        if not pipeline_py.exists():
-            # recursive search under weights_dir as last resort
-            found = next(weights_dir.rglob("pipeline_zero123plus.py"), None)
-            if found:
-                pipeline_py = found
-            else:
-                raise FileNotFoundError(
-                    "pipeline_zero123plus.py not found.\n"
-                    f"Searched: {[str(c) for c in candidates]}\n"
-                    f"And recursively under: {weights_dir}\n"
-                    "Ensure sudo-ai/zero123plus-v1.1 downloaded completely, or "
-                    "that repos/InstantMesh/ is cloned."
-                )
+        for candidate in local_candidates:
+            if candidate.is_file():
+                self.logger.info("Zero123++ pipeline .py (local): %s", candidate)
+                return weights_dir, str(candidate)
 
-        self.logger.info("Zero123++ pipeline .py: %s", pipeline_py)
-        return weights_dir, pipeline_py
+        # Recursive search under weights directory
+        found = next(weights_dir.rglob("pipeline_zero123plus.py"), None)
+        if found is not None:
+            self.logger.info("Zero123++ pipeline .py (found by search): %s", found)
+            return weights_dir, str(found)
+
+        # Last resort: let diffusers download the pipeline class from HuggingFace
+        # and cache it in its own cache directory (~/.cache/huggingface/).
+        hf_pipeline_id = "sudo-ai/zero123plus-v1.1"
+        self.logger.warning(
+            "pipeline_zero123plus.py not found locally "
+            "(searched %s and recursively under %s). "
+            "Falling back to HuggingFace repo-id '%s' — diffusers will "
+            "download and cache the pipeline class.",
+            [str(c) for c in local_candidates],
+            weights_dir,
+            hf_pipeline_id,
+        )
+        return weights_dir, hf_pipeline_id
 
     def _find_weights(self, settings) -> Path:
         """Locate or download Zero123++ weights; return a valid weights Path."""
