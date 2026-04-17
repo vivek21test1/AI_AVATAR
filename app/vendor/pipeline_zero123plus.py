@@ -103,45 +103,29 @@ class Zero123PlusPipeline(DiffusionPipeline):
     ):
         super().__init__()
 
-        # Build the module dict with only non-None entries.
-        # Use the actual name the component was passed under so that
-        # `self.<name>` attribute access works correctly.
-        modules: dict = {
-            "vae": vae,
-            "unet": unet,
-            "scheduler": scheduler,
-        }
-
-        # Vision encoder — prefer v1.1 name, fall back to legacy
-        if vision_encoder is not None:
-            modules["vision_encoder"] = vision_encoder
-        elif image_encoder is not None:
-            modules["image_encoder"] = image_encoder
-
-        # CLIP feature extractor — prefer v1.1 name, fall back to legacy
-        if feature_extractor_clip is not None:
-            modules["feature_extractor_clip"] = feature_extractor_clip
-        elif feature_extractor is not None:
-            modules["feature_extractor"] = feature_extractor
-
-        # VAE feature extractor (v1.1 only)
-        if feature_extractor_vae is not None:
-            modules["feature_extractor_vae"] = feature_extractor_vae
-
-        # Projection layer — prefer cc_projection, fall back to legacy
-        if cc_projection is not None:
-            modules["cc_projection"] = cc_projection
-        elif image_projection_model is not None:
-            modules["image_projection_model"] = image_projection_model
-
-        # Unused components — register if present so the pipeline can be
-        # saved/loaded cleanly, but they are not called during inference.
-        if text_encoder is not None:
-            modules["text_encoder"] = text_encoder
-        if tokenizer is not None:
-            modules["tokenizer"] = tokenizer
-
-        self.register_modules(**modules)
+        # Every __init__ parameter MUST be passed to register_modules — even
+        # as None.  diffusers' .components property validates that all
+        # parameters declared in __init__ have been set as attributes via
+        # register_modules, and raises ValueError for any that are missing.
+        self.register_modules(
+            vae=vae,
+            unet=unet,
+            scheduler=scheduler,
+            # v1.1 actual names — carry the real object when provided
+            vision_encoder=vision_encoder,
+            feature_extractor_clip=feature_extractor_clip,
+            feature_extractor_vae=feature_extractor_vae,
+            # legacy aliases — None when the v1.1 name was used instead
+            image_encoder=image_encoder,
+            feature_extractor=feature_extractor,
+            # projection (only one will be non-None at a time)
+            cc_projection=cc_projection,
+            image_projection_model=image_projection_model,
+            # unused but declared so .components validation passes
+            text_encoder=text_encoder,
+            tokenizer=tokenizer,
+            safety_checker=safety_checker,
+        )
 
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
