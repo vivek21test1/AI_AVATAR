@@ -6,9 +6,21 @@ Responsibilities:
   • Clone GitHub repos that carry inference source code
   • Track which downloads are currently in-flight (thread-safe)
   • Expose a fire-and-forget background download API
+
+Authentication for gated / private HuggingFace repos
+-----------------------------------------------------
+Some models (e.g. aigc3d/LAM) require you to accept terms on HuggingFace
+and authenticate with a personal access token.  Steps:
+  1. Create an account at https://huggingface.co
+  2. Accept the model's terms on its HuggingFace page
+  3. Create a read-access token at https://huggingface.co/settings/tokens
+  4. Export the token before starting the service:
+         export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxx
+  The service reads HF_TOKEN (or the legacy HUGGING_FACE_HUB_TOKEN) automatically.
 """
 
 import logging
+import os
 import subprocess
 import threading
 from pathlib import Path
@@ -24,11 +36,24 @@ from app.repositories.model_repository import ModelRepository
 logger = logging.getLogger(__name__)
 
 
+def _hf_token() -> Optional[str]:
+    """
+    Return a HuggingFace auth token from the environment, or None.
+    Reads HF_TOKEN first (current standard), then the legacy
+    HUGGING_FACE_HUB_TOKEN variable.
+    """
+    return (
+        os.environ.get("HF_TOKEN")
+        or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        or None
+    )
+
+
 class ModelDownloadService:
 
     def __init__(self, model_repo: ModelRepository) -> None:
         self._model_repo = model_repo
-        self._in_flight: set[str] = set()
+        self._in_flight: set = set()
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -95,7 +120,9 @@ class ModelDownloadService:
             return
 
         hf_repo = cfg["hf_repo"]
-        self._notify(cb, f"[{model_name}] Downloading weights from HuggingFace ({hf_repo}) …")
+        token = _hf_token()
+        auth_hint = " (HF_TOKEN is set)" if token else " (no HF_TOKEN — may fail for gated repos)"
+        self._notify(cb, f"[{model_name}] Downloading weights from HuggingFace ({hf_repo}){auth_hint} …")
         Path(local_dir).mkdir(parents=True, exist_ok=True)
 
         try:
@@ -104,11 +131,24 @@ class ModelDownloadService:
                 local_dir=local_dir,
                 local_dir_use_symlinks=False,
                 ignore_patterns=["*.msgpack", "flax_model*", "tf_model*", "rust_model*"],
+                token=token,
             )
         except RepositoryNotFoundError as exc:
+            exc_str = str(exc)
+            if "401" in exc_str or "Invalid username" in exc_str or "Unauthorized" in exc_str:
+                raise ModelDownloadError(
+                    f"HuggingFace authentication required for '{hf_repo}'.\n"
+                    "This repository is private or gated (requires accepting terms).\n"
+                    "Fix:\n"
+                    f"  1. Visit https://huggingface.co/{hf_repo} and accept the access terms.\n"
+                    "  2. Create a read token at https://huggingface.co/settings/tokens\n"
+                    "  3. export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxx\n"
+                    "  4. Restart the service."
+                ) from exc
             raise ModelDownloadError(
-                f"HuggingFace repository not found: {hf_repo}. "
-                "Verify the repo id in app/core/registry.py."
+                f"HuggingFace repository not found: '{hf_repo}'.\n"
+                "Check the repo_id in app/core/registry.py or visit "
+                f"https://huggingface.co/{hf_repo} to confirm it exists."
             ) from exc
         except Exception as exc:
             raise ModelDownloadError(
