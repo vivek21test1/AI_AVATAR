@@ -10,26 +10,28 @@ Pipeline:
   Stage 1 – Zero123++ v1.1 generates 6 multi-view images from the input.
   Stage 2 – InstantMesh LRM transformer + FlexiCubes reconstructs the mesh.
 
-Note on weights layout
-----------------------
-TencentARC/InstantMesh on HuggingFace contains ONLY the mesh reconstruction
-checkpoints (instant-mesh-large.ckpt / instant-mesh-base.ckpt).  It does NOT
-include the Zero123++ diffusion pipeline.
+Zero123++ weights search order
+-------------------------------
+1. model_cache/zero123plus/        — reuse standalone zero123plus download
+2. model_cache/instantmesh/<dir>/  — any sub-directory with model_index.json
+3. Download on-the-fly from sudo-ai/zero123plus-v1.1
 
-The Zero123++ weights are sourced in this priority order:
-  1. model_cache/zero123plus/        (reuse standalone zero123plus download)
-  2. model_cache/instantmesh/<dir>/  (any sub-directory with model_index.json)
-  3. Downloaded on-the-fly from sudo-ai/zero123plus-v1.1
+pipeline_zero123plus.py search order
+--------------------------------------
+A. Recursive search under repos/InstantMesh/  (cloned GitHub repo, any sub-path)
+B. Recursive search under <weights_dir>/
+C. model_cache/zero123plus/pipeline_zero123plus.py  (standalone model cache)
+D. HuggingFace hf_hub_download sudo-ai/zero123plus  (needs HF_TOKEN if gated)
+E. None  → from_pretrained without custom_pipeline  (last-resort; may fail if
+           Zero123PlusPipeline is not in the installed diffusers version)
 
-The custom pipeline code (pipeline_zero123plus.py) is taken from:
-  repos/InstantMesh/zero123plus/  when that directory exists (preferred),
-  otherwise from whichever weights directory is chosen above.
+If E also fails the user must supply pipeline_zero123plus.py manually.
 """
 
 import os
 import sys
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from PIL import Image
 
@@ -53,10 +55,7 @@ class InstantMeshModel(BaseAvatarModel):
         from diffusers import DiffusionPipeline, EulerAncestralDiscreteScheduler
         from omegaconf import OmegaConf
 
-        # ── Ensure the inference repo is cloned ───────────────────────
-        # pipeline_zero123plus.py lives inside repos/InstantMesh/zero123plus/.
-        # The download service clones the repo, but if that step was skipped
-        # or failed, clone it inline now so load() is self-contained.
+        # ── Ensure inference repo is cloned (needed for configs/ and src/) ──
         if not (self.repo_dir / ".git").exists():
             self._clone_repo()
 
@@ -65,15 +64,36 @@ class InstantMeshModel(BaseAvatarModel):
             sys.path.insert(0, repo_str)
 
         # ── Stage 1: Zero123++ multi-view pipeline ────────────────────
-        mv_weights, pipeline_py = self._resolve_zero123plus()
-        self.logger.info("Zero123++ weights : %s", mv_weights)
-        self.logger.info("Zero123++ pipeline: %s", pipeline_py)
+        mv_weights: Path = self._find_weights()
+        pipeline_py: Optional[str] = self._find_pipeline_py(mv_weights)
 
-        self._mv_pipeline = DiffusionPipeline.from_pretrained(
-            str(mv_weights),
-            custom_pipeline=str(pipeline_py),   # must be path to .py file, not directory
-            torch_dtype=torch.float16,
-        )
+        self.logger.info("Zero123++ weights : %s", mv_weights)
+        self.logger.info("Zero123++ pipeline: %s", pipeline_py or "(none — using model_index class)")
+
+        pretrained_kwargs = {"torch_dtype": torch.float16}
+        if pipeline_py is not None:
+            pretrained_kwargs["custom_pipeline"] = pipeline_py
+
+        try:
+            self._mv_pipeline = DiffusionPipeline.from_pretrained(
+                str(mv_weights), **pretrained_kwargs
+            )
+        except Exception as exc:
+            if pipeline_py is None:
+                # Already tried without custom_pipeline — nothing more to do
+                raise RuntimeError(
+                    "Cannot load Zero123++ pipeline.\n"
+                    "pipeline_zero123plus.py could not be found and "
+                    "DiffusionPipeline.from_pretrained failed without it.\n\n"
+                    "Fix (choose one):\n"
+                    "  1. Set HF_TOKEN and accept terms at "
+                    "https://huggingface.co/sudo-ai/zero123plus, then retry.\n"
+                    "  2. Download the zero123plus model first: "
+                    "POST /api/v1/models/zero123plus/download\n"
+                    f"  3. Copy pipeline_zero123plus.py manually to {mv_weights}/"
+                ) from exc
+            raise
+
         self._mv_pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
             self._mv_pipeline.scheduler.config, timestep_spacing="trailing"
         )
@@ -139,7 +159,6 @@ class InstantMeshModel(BaseAvatarModel):
         mv_steps: int = kwargs.get("mv_steps", 75)
         use_texmap: bool = kwargs.get("export_texmap", True)
 
-        # ── Stage 1: multi-view generation ───────────────────────────
         generator = torch.Generator(device=self.device).manual_seed(seed)
         mv_grid: Image.Image = self._mv_pipeline(
             image, num_inference_steps=mv_steps, generator=generator
@@ -148,7 +167,6 @@ class InstantMeshModel(BaseAvatarModel):
         mv_path = str(out / "multiview.png")
         mv_grid.save(mv_path)
 
-        # ── Stage 2: 3-D reconstruction ───────────────────────────────
         if self._mesh_model is not None:
             try:
                 output_files = self._reconstruct(mv_grid, out, use_texmap)
@@ -170,22 +188,14 @@ class InstantMeshModel(BaseAvatarModel):
     # ------------------------------------------------------------------
 
     def _clone_repo(self) -> None:
-        """
-        Clone the TencentARC/InstantMesh GitHub repo to ``self.repo_dir``.
-        Called from ``load()`` when the repo directory is missing or incomplete
-        (no ``.git``).  This ensures ``zero123plus/pipeline_zero123plus.py``
-        and the ``src/`` inference utilities are available before loading.
-        """
+        """Clone TencentARC/InstantMesh to self.repo_dir (shallow, depth=1)."""
         import subprocess
 
         github_url = "https://github.com/TencentARC/InstantMesh.git"
-        self.logger.info(
-            "InstantMesh repo not found — cloning %s to %s …",
-            github_url, self.repo_dir,
-        )
+        self.logger.info("Cloning InstantMesh repo to %s …", self.repo_dir)
         self.repo_dir.parent.mkdir(parents=True, exist_ok=True)
 
-        # Remove a stale/partial directory so git clone doesn't complain
+        # Remove a stale partial directory (no .git) before cloning
         if self.repo_dir.exists() and not (self.repo_dir / ".git").exists():
             import shutil
             shutil.rmtree(self.repo_dir, ignore_errors=True)
@@ -196,84 +206,29 @@ class InstantMeshModel(BaseAvatarModel):
             text=True,
         )
         if result.returncode != 0:
-            raise RuntimeError(
-                f"Failed to clone InstantMesh repo from {github_url}:\n"
-                f"{result.stderr}\n"
-                f"Ensure git is installed and the server can reach GitHub."
+            self.logger.warning(
+                "git clone failed (returncode=%d): %s — "
+                "will continue without repo; configs and src/ utilities unavailable.",
+                result.returncode, result.stderr.strip(),
             )
-        self.logger.info("InstantMesh repo cloned → %s", self.repo_dir)
+        else:
+            self.logger.info("InstantMesh repo cloned → %s", self.repo_dir)
 
     # ------------------------------------------------------------------
-    # Zero123++ resolution
+    # Zero123++ helpers
     # ------------------------------------------------------------------
 
-    def _resolve_zero123plus(self) -> Tuple[Path, str]:
-        """
-        Return ``(weights_dir, custom_pipeline)`` for the Zero123++ stage.
-
-        ``custom_pipeline`` must be an absolute path to a ``.py`` file.
-        diffusers does NOT accept a directory; when given an HF repo-id it
-        looks for ``pipeline.py`` (not ``pipeline_zero123plus.py``), so the
-        repo-id shortcut does not work for sudo-ai/zero123plus-v1.1.
-
-        Weights search order
-        --------------------
-        1. model_cache/zero123plus/           — reuse standalone download
-        2. Any sub-dir of model_cache/instantmesh/ that has model_index.json
-        3. Download sudo-ai/zero123plus-v1.1 into model_cache/instantmesh/zero123plus-v1.1/
-
-        Pipeline .py file search order
-        -------------------------------
-        A. repos/InstantMesh/zero123plus/pipeline_zero123plus.py
-        B. <weights_dir>/pipeline_zero123plus.py
-        C. model_cache/zero123plus/pipeline_zero123plus.py  (standalone model)
-        D. Recursive glob under <weights_dir>
-        E. Download pipeline_zero123plus.py from sudo-ai/zero123plus (non-versioned
-           HF repo) or GitHub raw URLs into <weights_dir>/pipeline_zero123plus.py
-        """
+    def _find_weights(self) -> Path:
+        """Locate or download Zero123++ weights; return the directory Path."""
         from app.core.config import settings
 
-        # ── locate weights ──────────────────────────────────────────
-        weights_dir: Path = self._find_weights(settings)
-
-        # ── locate pipeline code ────────────────────────────────────
-        local_candidates = [
-            self.repo_dir / "zero123plus" / "pipeline_zero123plus.py",
-            weights_dir / "pipeline_zero123plus.py",
-            settings.MODEL_CACHE_DIR / "zero123plus" / "pipeline_zero123plus.py",
-        ]
-
-        for candidate in local_candidates:
-            if candidate.is_file():
-                self.logger.info("Zero123++ pipeline .py (local): %s", candidate)
-                return weights_dir, str(candidate)
-
-        # Recursive search under weights directory
-        found = next(weights_dir.rglob("pipeline_zero123plus.py"), None)
-        if found is not None:
-            self.logger.info("Zero123++ pipeline .py (found by search): %s", found)
-            return weights_dir, str(found)
-
-        # Last resort: download just the .py file from HuggingFace.
-        # NOTE: passing the HF repo-id to diffusers does NOT work here because
-        # diffusers looks for "pipeline.py" in the repo, not
-        # "pipeline_zero123plus.py".  We must have a local .py file.
-        pipeline_target = weights_dir / "pipeline_zero123plus.py"
-        self._download_pipeline_py(pipeline_target)
-        return weights_dir, str(pipeline_target)
-
-    def _find_weights(self, settings) -> Path:
-        """Locate or download Zero123++ weights; return a valid weights Path."""
-
-        # Priority 1: reuse standalone zero123plus model if already downloaded
+        # Priority 1: reuse standalone zero123plus model if downloaded
         standalone = settings.MODEL_CACHE_DIR / "zero123plus"
         if (standalone / "model_index.json").exists():
-            self.logger.info(
-                "Reusing model_cache/zero123plus/ for InstantMesh multi-view stage."
-            )
+            self.logger.info("Reusing model_cache/zero123plus/ for multi-view stage.")
             return standalone
 
-        # Priority 2: any sub-directory inside our own cache
+        # Priority 2: any sub-directory inside InstantMesh's own cache
         base = Path(self.local_dir)
         if base.is_dir():
             for sub in sorted(base.iterdir()):
@@ -283,10 +238,84 @@ class InstantMeshModel(BaseAvatarModel):
                     )
                     return sub
 
-        # Priority 3: download zero123plus-v1.1 (the version InstantMesh was trained with)
+        # Priority 3: download zero123plus-v1.1
         target = base / "zero123plus-v1.1"
         self._download_zero123plus(target)
         return target
+
+    def _find_pipeline_py(self, weights_dir: Path) -> Optional[str]:
+        """
+        Search all known locations for pipeline_zero123plus.py.
+        Returns the absolute path as a string, or None if not found anywhere.
+        Never raises — callers handle the None case.
+        """
+        from app.core.config import settings
+
+        # ── Explicit high-priority candidates ──────────────────────────
+        explicit = [
+            weights_dir / "pipeline_zero123plus.py",
+            settings.MODEL_CACHE_DIR / "zero123plus" / "pipeline_zero123plus.py",
+        ]
+        for p in explicit:
+            if p.is_file():
+                self.logger.info("Found pipeline_zero123plus.py at %s", p)
+                return str(p)
+
+        # ── Recursive search: entire cloned repo (any sub-path) ────────
+        if self.repo_dir.is_dir():
+            found = next(self.repo_dir.rglob("pipeline_zero123plus.py"), None)
+            if found is not None:
+                self.logger.info("Found pipeline_zero123plus.py in repo: %s", found)
+                return str(found)
+
+        # ── Recursive search: weights directory ────────────────────────
+        found = next(weights_dir.rglob("pipeline_zero123plus.py"), None)
+        if found is not None:
+            self.logger.info("Found pipeline_zero123plus.py in weights: %s", found)
+            return str(found)
+
+        # ── Try downloading from HuggingFace (needs HF_TOKEN if gated) ─
+        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
+        target = weights_dir / "pipeline_zero123plus.py"
+        try:
+            from huggingface_hub import hf_hub_download
+
+            self.logger.info(
+                "pipeline_zero123plus.py not found locally — "
+                "attempting HF download (sudo-ai/zero123plus) …"
+            )
+            hf_hub_download(
+                repo_id="sudo-ai/zero123plus",
+                filename="pipeline_zero123plus.py",
+                local_dir=str(target.parent),
+                local_dir_use_symlinks=False,
+                token=token,
+            )
+            if target.is_file():
+                self.logger.info("Downloaded pipeline_zero123plus.py → %s", target)
+                return str(target)
+        except Exception as exc:
+            token_hint = (
+                " (tip: set HF_TOKEN — the repo may require authentication)"
+                if token is None else ""
+            )
+            self.logger.warning(
+                "HF download of pipeline_zero123plus.py failed%s: %s",
+                token_hint, exc,
+            )
+
+        # ── Nothing worked ─────────────────────────────────────────────
+        self.logger.warning(
+            "pipeline_zero123plus.py could not be found or downloaded. "
+            "Will attempt DiffusionPipeline.from_pretrained without custom_pipeline. "
+            "If that fails, fix:\n"
+            "  1. Set HF_TOKEN and accept terms at "
+            "https://huggingface.co/sudo-ai/zero123plus\n"
+            "  2. Or: POST /api/v1/models/zero123plus/download first\n"
+            "  3. Or: copy pipeline_zero123plus.py manually to %s",
+            target,
+        )
+        return None
 
     def _download_zero123plus(self, target: Path) -> None:
         from huggingface_hub import snapshot_download
@@ -307,72 +336,10 @@ class InstantMeshModel(BaseAvatarModel):
         except RepositoryNotFoundError as exc:
             raise RuntimeError(
                 "Could not download sudo-ai/zero123plus-v1.1 from HuggingFace.\n"
-                "Either download the zero123plus model first via POST /api/v1/models/zero123plus/download,\n"
+                "Either download the zero123plus model first via "
+                "POST /api/v1/models/zero123plus/download,\n"
                 "or set HF_TOKEN if the repo requires authentication."
             ) from exc
-
-    def _download_pipeline_py(self, target: Path) -> None:
-        """
-        Download ``pipeline_zero123plus.py`` into ``target``.
-
-        Sources tried in order:
-          1. HuggingFace  sudo-ai/zero123plus       (non-versioned repo — has the file)
-          2. GitHub raw   TencentARC/InstantMesh    (their copy under zero123plus/)
-          3. GitHub raw   SUDO-AI-3D/zero123plus    (upstream source)
-
-        NOTE: sudo-ai/zero123plus-v1.1 is weights-only; it does NOT contain
-        pipeline_zero123plus.py, so we must not use that repo here.
-        """
-        import requests
-
-        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
-        target.parent.mkdir(parents=True, exist_ok=True)
-
-        # ── Source 1: HuggingFace sudo-ai/zero123plus (has the file) ─────
-        try:
-            from huggingface_hub import hf_hub_download
-
-            self.logger.info(
-                "Downloading pipeline_zero123plus.py from sudo-ai/zero123plus → %s …", target
-            )
-            hf_hub_download(
-                repo_id="sudo-ai/zero123plus",
-                filename="pipeline_zero123plus.py",
-                local_dir=str(target.parent),
-                local_dir_use_symlinks=False,
-                token=token,
-            )
-            if target.is_file():
-                self.logger.info("Downloaded pipeline_zero123plus.py → %s", target)
-                return
-        except Exception as exc:
-            self.logger.warning("HF download failed (%s) — trying GitHub …", exc)
-
-        # ── Sources 2 & 3: GitHub raw URLs ───────────────────────────────
-        github_urls = [
-            "https://raw.githubusercontent.com/TencentARC/InstantMesh/main/zero123plus/pipeline_zero123plus.py",
-            "https://raw.githubusercontent.com/SUDO-AI-3D/zero123plus/main/pipeline_zero123plus.py",
-        ]
-        last_exc: Exception = RuntimeError("no sources tried")
-        for url in github_urls:
-            try:
-                self.logger.info("Downloading pipeline_zero123plus.py from %s …", url)
-                resp = requests.get(url, timeout=60)
-                resp.raise_for_status()
-                target.write_bytes(resp.content)
-                self.logger.info("Downloaded pipeline_zero123plus.py → %s", target)
-                return
-            except Exception as exc:
-                self.logger.warning("GitHub download failed from %s: %s", url, exc)
-                last_exc = exc
-
-        raise RuntimeError(
-            f"Could not download pipeline_zero123plus.py from any source.\n"
-            f"Last error: {last_exc}\n"
-            "Manual fix: copy pipeline_zero123plus.py from\n"
-            "  repos/InstantMesh/zero123plus/pipeline_zero123plus.py  (after cloning the repo)\n"
-            f"to  {target}"
-        ) from last_exc
 
     # ------------------------------------------------------------------
     # Reconstruction helper
