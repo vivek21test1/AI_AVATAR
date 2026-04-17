@@ -10,6 +10,13 @@ License: Apache 2.0
 This file is bundled with the project because the original HuggingFace repo
 (sudo-ai/zero123plus) has been deleted and the GitHub raw URLs are no longer
 accessible from the deployment environment.
+
+Component names in sudo-ai/zero123plus-v1.1/model_index.json
+-------------------------------------------------------------
+Required : vae, unet, scheduler
+Optional : vision_encoder, feature_extractor_clip, feature_extractor_vae,
+           cc_projection, text_encoder, tokenizer, safety_checker
+Config   : ramping_coefficients  (list of floats — NOT a loadable module)
 """
 
 from typing import List, Optional, Union
@@ -54,38 +61,84 @@ class Zero123PlusPipeline(DiffusionPipeline):
         # output_grid is PIL Image of size (width*3, height*2)
     """
 
-    # Components that may or may not be present depending on the model version.
-    # sudo-ai/zero123plus-v1.1 uses "cc_projection" (a CCProjection layer).
-    # Earlier variants used "image_projection_model".
-    # Both are listed as optional so diffusers does not reject unexpected kwargs.
-    _optional_components = ["cc_projection", "image_projection_model"]
+    # All non-core components are optional — diffusers uses default=None in
+    # __init__ to decide what's required vs optional.
+    _optional_components = [
+        "vision_encoder",
+        "feature_extractor_clip",
+        "feature_extractor_vae",
+        "cc_projection",
+        "image_projection_model",  # legacy name variant
+        "image_encoder",           # legacy name variant
+        "feature_extractor",       # legacy name variant
+        "text_encoder",
+        "tokenizer",
+        "safety_checker",
+    ]
 
     def __init__(
         self,
+        # ── Required components (always present in model_index.json) ──────
         vae: AutoencoderKL,
-        image_encoder: CLIPVisionModelWithProjection,
-        feature_extractor: CLIPImageProcessor,
         unet: UNet2DConditionModel,
         scheduler: EulerAncestralDiscreteScheduler,
+        # ── Optional components — zero123plus-v1.1 actual names ──────────
+        vision_encoder: Optional[CLIPVisionModelWithProjection] = None,
+        feature_extractor_clip: Optional[CLIPImageProcessor] = None,
+        feature_extractor_vae: Optional[CLIPImageProcessor] = None,
+        # ── Projection layer (may or may not exist) ───────────────────────
         cc_projection=None,
+        # ── Legacy naming aliases (kept for older model_index.json) ───────
+        image_encoder: Optional[CLIPVisionModelWithProjection] = None,
+        feature_extractor: Optional[CLIPImageProcessor] = None,
         image_projection_model=None,
+        # ── Components present in model_index but not used at inference ───
+        text_encoder=None,
+        tokenizer=None,
+        safety_checker=None,
+        # ── Absorb any remaining config values (e.g. ramping_coefficients) ─
+        **kwargs,
     ):
         super().__init__()
-        modules = {
+
+        # Build the module dict with only non-None entries.
+        # Use the actual name the component was passed under so that
+        # `self.<name>` attribute access works correctly.
+        modules: dict = {
             "vae": vae,
-            "image_encoder": image_encoder,
-            "feature_extractor": feature_extractor,
             "unet": unet,
             "scheduler": scheduler,
         }
-        # Accept either naming convention — store under a canonical attribute
-        proj = cc_projection if cc_projection is not None else image_projection_model
-        if proj is not None:
-            # Register under whichever name the model_index.json used
-            if cc_projection is not None:
-                modules["cc_projection"] = proj
-            else:
-                modules["image_projection_model"] = proj
+
+        # Vision encoder — prefer v1.1 name, fall back to legacy
+        if vision_encoder is not None:
+            modules["vision_encoder"] = vision_encoder
+        elif image_encoder is not None:
+            modules["image_encoder"] = image_encoder
+
+        # CLIP feature extractor — prefer v1.1 name, fall back to legacy
+        if feature_extractor_clip is not None:
+            modules["feature_extractor_clip"] = feature_extractor_clip
+        elif feature_extractor is not None:
+            modules["feature_extractor"] = feature_extractor
+
+        # VAE feature extractor (v1.1 only)
+        if feature_extractor_vae is not None:
+            modules["feature_extractor_vae"] = feature_extractor_vae
+
+        # Projection layer — prefer cc_projection, fall back to legacy
+        if cc_projection is not None:
+            modules["cc_projection"] = cc_projection
+        elif image_projection_model is not None:
+            modules["image_projection_model"] = image_projection_model
+
+        # Unused components — register if present so the pipeline can be
+        # saved/loaded cleanly, but they are not called during inference.
+        if text_encoder is not None:
+            modules["text_encoder"] = text_encoder
+        if tokenizer is not None:
+            modules["tokenizer"] = tokenizer
+
         self.register_modules(**modules)
 
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
@@ -95,20 +148,50 @@ class Zero123PlusPipeline(DiffusionPipeline):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _get_vision_encoder(self):
+        """Return whichever vision encoder was registered (either name)."""
+        enc = getattr(self, "vision_encoder", None) or getattr(self, "image_encoder", None)
+        if enc is None:
+            raise RuntimeError(
+                "Zero123PlusPipeline has no vision encoder. "
+                "Expected 'vision_encoder' or 'image_encoder' component."
+            )
+        return enc
+
+    def _get_feature_extractor_clip(self):
+        """Return whichever CLIP feature extractor was registered (either name)."""
+        fe = (
+            getattr(self, "feature_extractor_clip", None)
+            or getattr(self, "feature_extractor", None)
+        )
+        if fe is None:
+            raise RuntimeError(
+                "Zero123PlusPipeline has no CLIP feature extractor. "
+                "Expected 'feature_extractor_clip' or 'feature_extractor' component."
+            )
+        return fe
+
+    def _get_projection(self):
+        """Return projection layer if any (either name), or None."""
+        return (
+            getattr(self, "cc_projection", None)
+            or getattr(self, "image_projection_model", None)
+        )
+
     def _encode_image_clip(
         self, image: Image.Image, device: torch.device, dtype: torch.dtype
     ) -> torch.Tensor:
         """Encode reference image through CLIP → cross-attention hidden states."""
-        pixel_values = self.feature_extractor(
+        feature_extractor = self._get_feature_extractor_clip()
+        vision_encoder = self._get_vision_encoder()
+
+        pixel_values = feature_extractor(
             images=image, return_tensors="pt"
         ).pixel_values.to(device=device, dtype=dtype)
 
-        image_embeds = self.image_encoder(pixel_values).image_embeds  # [1, D]
+        image_embeds = vision_encoder(pixel_values).image_embeds  # [1, D]
 
-        # Project to cross-attention format if a projection model is present.
-        # sudo-ai/zero123plus-v1.1 registers it as "cc_projection";
-        # earlier variants used "image_projection_model".
-        proj = getattr(self, "cc_projection", None) or getattr(self, "image_projection_model", None)
+        proj = self._get_projection()
         if proj is not None:
             image_embeds = proj(image_embeds)          # [1, N, cross_dim]
         else:
