@@ -245,13 +245,19 @@ class InstantMeshModel(BaseAvatarModel):
 
     def _find_pipeline_py(self, weights_dir: Path) -> Optional[str]:
         """
-        Search all known locations for pipeline_zero123plus.py.
+        Search all known locations for a file containing Zero123PlusPipeline.
         Returns the absolute path as a string, or None if not found anywhere.
         Never raises — callers handle the None case.
         """
         from app.core.config import settings
 
-        # ── Explicit high-priority candidates ──────────────────────────
+        # ── 1. Vendored bundled copy (always present in this project) ───
+        vendor_path = Path(__file__).parent.parent / "vendor" / "pipeline_zero123plus.py"
+        if vendor_path.is_file():
+            self.logger.info("Using vendored pipeline_zero123plus.py: %s", vendor_path)
+            return str(vendor_path)
+
+        # ── 2. Exact filename in known locations ────────────────────────
         explicit = [
             weights_dir / "pipeline_zero123plus.py",
             settings.MODEL_CACHE_DIR / "zero123plus" / "pipeline_zero123plus.py",
@@ -261,41 +267,38 @@ class InstantMeshModel(BaseAvatarModel):
                 self.logger.info("Found pipeline_zero123plus.py at %s", p)
                 return str(p)
 
-        # ── Recursive search: entire cloned repo (any sub-path) ────────
-        if self.repo_dir.is_dir():
-            found = next(self.repo_dir.rglob("pipeline_zero123plus.py"), None)
-            if found is not None:
-                self.logger.info("Found pipeline_zero123plus.py in repo: %s", found)
-                return str(found)
+        # ── 3. Class-name search in ALL .py files (any filename) ────────
+        # Handles renames, subdirectory moves, and alternative copies.
+        keyword = "Zero123PlusPipeline"
+        for root in [self.repo_dir, weights_dir, settings.MODEL_CACHE_DIR]:
+            if not root.is_dir():
+                continue
+            for py_file in root.rglob("*.py"):
+                try:
+                    if keyword in py_file.read_text(errors="ignore"):
+                        self.logger.info(
+                            "Found %s class in %s", keyword, py_file
+                        )
+                        return str(py_file)
+                except Exception:
+                    continue
 
-        # ── Recursive search: weights directory ────────────────────────
-        found = next(weights_dir.rglob("pipeline_zero123plus.py"), None)
-        if found is not None:
-            self.logger.info("Found pipeline_zero123plus.py in weights: %s", found)
-            return str(found)
-
-        # ── Try HuggingFace: download all .py files and search them ────
-        # hf_hub_download for the specific filename returns 404 because the
-        # repo may have moved the file.  Download every .py file in the repo
-        # and look for the one that defines Zero123PlusPipeline.
+        # ── 4. HuggingFace .py scan (repo may have moved the file) ──────
         token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
         target = weights_dir / "pipeline_zero123plus.py"
-
         found_via_hf = self._fetch_pipeline_from_hf(target, token)
         if found_via_hf:
             return str(found_via_hf)
 
-        # ── Nothing worked ─────────────────────────────────────────────
-        token_hint = " (export HF_TOKEN=<your_token>)" if not token else ""
+        # ── 5. Clone SUDO-AI-3D/zero123plus GitHub repo and search ──────
+        found_via_git = self._fetch_pipeline_from_github(target)
+        if found_via_git:
+            return str(found_via_git)
+
+        # ── Nothing worked — fall through to no-custom-pipeline attempt ─
         self.logger.warning(
-            "pipeline_zero123plus.py could not be found or downloaded%s. "
-            "Will attempt DiffusionPipeline.from_pretrained without custom_pipeline. "
-            "If that fails:\n"
-            "  1. Set HF_TOKEN and accept terms at "
-            "https://huggingface.co/sudo-ai/zero123plus\n"
-            "  2. Or: POST /api/v1/models/zero123plus/download first\n"
-            "  3. Or: copy pipeline_zero123plus.py manually to %s",
-            token_hint, target,
+            "All pipeline_zero123plus.py search attempts failed. "
+            "Will try DiffusionPipeline.from_pretrained without custom_pipeline."
         )
         return None
 
@@ -353,6 +356,52 @@ class InstantMeshModel(BaseAvatarModel):
         self.logger.warning(
             "No Zero123Plus pipeline class found in any .py file from "
             "sudo-ai/zero123plus."
+        )
+        return None
+
+    def _fetch_pipeline_from_github(self, dest: Path) -> Optional[Path]:
+        """
+        Shallow-clone SUDO-AI-3D/zero123plus from GitHub, search every .py file
+        for the Zero123PlusPipeline class, copy the matching file to *dest*, and
+        return *dest* on success.  Returns None on any failure.
+        """
+        import shutil
+        import subprocess
+        import tempfile
+
+        github_url = "https://github.com/SUDO-AI-3D/zero123plus.git"
+        self.logger.info(
+            "Attempting shallow clone of %s to find pipeline code …", github_url
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(
+                ["git", "clone", "--depth=1", github_url, tmp],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                self.logger.warning(
+                    "git clone of %s failed (rc=%d): %s",
+                    github_url, result.returncode, result.stderr.strip(),
+                )
+                return None
+
+            keywords = ("Zero123PlusPipeline", "class Zero123Plus", "zero123plus")
+            for py_file in sorted(Path(tmp).rglob("*.py")):
+                try:
+                    content = py_file.read_text(errors="ignore")
+                    if any(kw in content for kw in keywords):
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(py_file, dest)
+                        self.logger.info(
+                            "Found pipeline code in %s → copied to %s", py_file, dest
+                        )
+                        return dest
+                except Exception:
+                    continue
+
+        self.logger.warning(
+            "No Zero123Plus pipeline class found in SUDO-AI-3D/zero123plus clone."
         )
         return None
 
