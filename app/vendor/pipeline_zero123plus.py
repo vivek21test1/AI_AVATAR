@@ -96,8 +96,10 @@ class Zero123PlusPipeline(DiffusionPipeline):
         text_encoder=None,
         tokenizer=None,
         safety_checker=None,
-        # ── Absorb any remaining config values (e.g. ramping_coefficients) ─
-        **kwargs,
+        # NOTE: no **kwargs — diffusers introspects __init__ and would treat
+        # 'kwargs' as a required component directory.  Unrecognised config
+        # values (e.g. ramping_coefficients) are stored automatically in
+        # self.config by DiffusionPipeline.from_pretrained.
     ):
         super().__init__()
 
