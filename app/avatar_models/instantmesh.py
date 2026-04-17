@@ -183,8 +183,8 @@ class InstantMeshModel(BaseAvatarModel):
         B. <weights_dir>/pipeline_zero123plus.py
         C. model_cache/zero123plus/pipeline_zero123plus.py  (standalone model)
         D. Recursive glob under <weights_dir>
-        E. Download pipeline_zero123plus.py from sudo-ai/zero123plus-v1.1 into
-           <weights_dir>/pipeline_zero123plus.py  (last resort)
+        E. Download pipeline_zero123plus.py from sudo-ai/zero123plus (non-versioned
+           HF repo) or GitHub raw URLs into <weights_dir>/pipeline_zero123plus.py
         """
         from app.core.config import settings
 
@@ -268,34 +268,66 @@ class InstantMeshModel(BaseAvatarModel):
 
     def _download_pipeline_py(self, target: Path) -> None:
         """
-        Download only ``pipeline_zero123plus.py`` from sudo-ai/zero123plus-v1.1
-        into ``target``.  This is the fallback when the file is not already
-        present in any of the searched local directories.
+        Download ``pipeline_zero123plus.py`` into ``target``.
 
-        We cannot use the HF repo-id shortcut with diffusers because diffusers
-        looks for ``pipeline.py`` (not ``pipeline_zero123plus.py``) in the repo.
+        Sources tried in order:
+          1. HuggingFace  sudo-ai/zero123plus       (non-versioned repo — has the file)
+          2. GitHub raw   TencentARC/InstantMesh    (their copy under zero123plus/)
+          3. GitHub raw   SUDO-AI-3D/zero123plus    (upstream source)
+
+        NOTE: sudo-ai/zero123plus-v1.1 is weights-only; it does NOT contain
+        pipeline_zero123plus.py, so we must not use that repo here.
         """
-        from huggingface_hub import hf_hub_download
+        import requests
 
         token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
-        self.logger.info(
-            "pipeline_zero123plus.py not found locally — downloading from "
-            "sudo-ai/zero123plus-v1.1 to %s …", target
-        )
         target.parent.mkdir(parents=True, exist_ok=True)
-        hf_hub_download(
-            repo_id="sudo-ai/zero123plus-v1.1",
-            filename="pipeline_zero123plus.py",
-            local_dir=str(target.parent),
-            local_dir_use_symlinks=False,
-            token=token,
-        )
-        if not target.is_file():
-            raise RuntimeError(
-                f"hf_hub_download completed but {target} is missing — "
-                "check disk permissions or HuggingFace availability."
+
+        # ── Source 1: HuggingFace sudo-ai/zero123plus (has the file) ─────
+        try:
+            from huggingface_hub import hf_hub_download
+
+            self.logger.info(
+                "Downloading pipeline_zero123plus.py from sudo-ai/zero123plus → %s …", target
             )
-        self.logger.info("Downloaded pipeline_zero123plus.py → %s", target)
+            hf_hub_download(
+                repo_id="sudo-ai/zero123plus",
+                filename="pipeline_zero123plus.py",
+                local_dir=str(target.parent),
+                local_dir_use_symlinks=False,
+                token=token,
+            )
+            if target.is_file():
+                self.logger.info("Downloaded pipeline_zero123plus.py → %s", target)
+                return
+        except Exception as exc:
+            self.logger.warning("HF download failed (%s) — trying GitHub …", exc)
+
+        # ── Sources 2 & 3: GitHub raw URLs ───────────────────────────────
+        github_urls = [
+            "https://raw.githubusercontent.com/TencentARC/InstantMesh/main/zero123plus/pipeline_zero123plus.py",
+            "https://raw.githubusercontent.com/SUDO-AI-3D/zero123plus/main/pipeline_zero123plus.py",
+        ]
+        last_exc: Exception = RuntimeError("no sources tried")
+        for url in github_urls:
+            try:
+                self.logger.info("Downloading pipeline_zero123plus.py from %s …", url)
+                resp = requests.get(url, timeout=60)
+                resp.raise_for_status()
+                target.write_bytes(resp.content)
+                self.logger.info("Downloaded pipeline_zero123plus.py → %s", target)
+                return
+            except Exception as exc:
+                self.logger.warning("GitHub download failed from %s: %s", url, exc)
+                last_exc = exc
+
+        raise RuntimeError(
+            f"Could not download pipeline_zero123plus.py from any source.\n"
+            f"Last error: {last_exc}\n"
+            "Manual fix: copy pipeline_zero123plus.py from\n"
+            "  repos/InstantMesh/zero123plus/pipeline_zero123plus.py  (after cloning the repo)\n"
+            f"to  {target}"
+        ) from last_exc
 
     # ------------------------------------------------------------------
     # Reconstruction helper
