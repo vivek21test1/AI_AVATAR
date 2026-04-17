@@ -58,17 +58,13 @@ class InstantMeshModel(BaseAvatarModel):
             sys.path.insert(0, repo_str)
 
         # ── Stage 1: Zero123++ multi-view pipeline ────────────────────
-        mv_weights, pipeline_code = self._resolve_zero123plus()
-        self.logger.info(
-            "Zero123++ weights : %s", mv_weights
-        )
-        self.logger.info(
-            "Zero123++ pipeline: %s", pipeline_code
-        )
+        mv_weights, pipeline_py = self._resolve_zero123plus()
+        self.logger.info("Zero123++ weights : %s", mv_weights)
+        self.logger.info("Zero123++ pipeline: %s", pipeline_py)
 
         self._mv_pipeline = DiffusionPipeline.from_pretrained(
             str(mv_weights),
-            custom_pipeline=str(pipeline_code),
+            custom_pipeline=str(pipeline_py),   # must be path to .py file, not directory
             torch_dtype=torch.float16,
         )
         self._mv_pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
@@ -168,7 +164,7 @@ class InstantMeshModel(BaseAvatarModel):
 
     def _resolve_zero123plus(self) -> Tuple[Path, Path]:
         """
-        Return (weights_dir, pipeline_code_dir) for the Zero123++ stage.
+        Return (weights_dir, pipeline_py_file) for the Zero123++ stage.
 
         Weights search order
         --------------------
@@ -176,27 +172,43 @@ class InstantMeshModel(BaseAvatarModel):
         2. Any sub-dir of model_cache/instantmesh/ that has model_index.json
         3. Download sudo-ai/zero123plus-v1.1 into model_cache/instantmesh/zero123plus-v1.1/
 
-        Pipeline code search order
-        --------------------------
-        A. repos/InstantMesh/zero123plus/  (InstantMesh's version, preferred)
-        B. Same directory as weights       (HF snapshot includes pipeline_zero123plus.py)
+        Pipeline .py file search order
+        -------------------------------
+        diffusers recognises a local custom pipeline ONLY when custom_pipeline
+        is a path that ends in ".py" (not a directory).  We therefore resolve
+        to the actual pipeline_zero123plus.py file, trying:
+          A. repos/InstantMesh/zero123plus/pipeline_zero123plus.py  (preferred)
+          B. <weights_dir>/pipeline_zero123plus.py  (HF snapshot includes it)
+          C. Any pipeline_zero123plus.py anywhere under <weights_dir>
         """
         from app.core.config import settings
 
         # ── locate weights ──────────────────────────────────────────
         weights_dir: Path = self._find_weights(settings)
 
-        # ── locate pipeline code ────────────────────────────────────
-        repo_pipeline = self.repo_dir / "zero123plus"
-        if repo_pipeline.is_dir() and (repo_pipeline / "pipeline_zero123plus.py").exists():
-            pipeline_code = repo_pipeline
-        elif (weights_dir / "pipeline_zero123plus.py").exists():
-            pipeline_code = weights_dir
-        else:
-            # Fallback: diffusers will search the weights dir
-            pipeline_code = weights_dir
+        # ── locate pipeline .py file ────────────────────────────────
+        candidates = [
+            self.repo_dir / "zero123plus" / "pipeline_zero123plus.py",
+            weights_dir / "pipeline_zero123plus.py",
+        ]
+        pipeline_py: Path = next((p for p in candidates if p.exists()), Path())
 
-        return weights_dir, pipeline_code
+        if not pipeline_py.exists():
+            # recursive search under weights_dir as last resort
+            found = next(weights_dir.rglob("pipeline_zero123plus.py"), None)
+            if found:
+                pipeline_py = found
+            else:
+                raise FileNotFoundError(
+                    "pipeline_zero123plus.py not found.\n"
+                    f"Searched: {[str(c) for c in candidates]}\n"
+                    f"And recursively under: {weights_dir}\n"
+                    "Ensure sudo-ai/zero123plus-v1.1 downloaded completely, or "
+                    "that repos/InstantMesh/ is cloned."
+                )
+
+        self.logger.info("Zero123++ pipeline .py: %s", pipeline_py)
+        return weights_dir, pipeline_py
 
     def _find_weights(self, settings) -> Path:
         """Locate or download Zero123++ weights; return a valid weights Path."""
