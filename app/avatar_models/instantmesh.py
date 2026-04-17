@@ -70,7 +70,7 @@ class InstantMeshModel(BaseAvatarModel):
         self.logger.info("Zero123++ weights : %s", mv_weights)
         self.logger.info("Zero123++ pipeline: %s", pipeline_py or "(none — using model_index class)")
 
-        pretrained_kwargs = {"torch_dtype": torch.float16}
+        pretrained_kwargs = {"dtype": torch.float16}
         if pipeline_py is not None:
             pretrained_kwargs["custom_pipeline"] = pipeline_py
 
