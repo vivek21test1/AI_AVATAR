@@ -166,11 +166,10 @@ class InstantMeshModel(BaseAvatarModel):
         """
         Return ``(weights_dir, custom_pipeline)`` for the Zero123++ stage.
 
-        ``custom_pipeline`` is the value passed directly to
-        ``DiffusionPipeline.from_pretrained(custom_pipeline=...)``.
-        diffusers accepts either:
-          • An absolute path ending in ".py"  → loaded from local file
-          • A HuggingFace repo-id string      → pipeline class fetched from HF
+        ``custom_pipeline`` must be an absolute path to a ``.py`` file.
+        diffusers does NOT accept a directory; when given an HF repo-id it
+        looks for ``pipeline.py`` (not ``pipeline_zero123plus.py``), so the
+        repo-id shortcut does not work for sudo-ai/zero123plus-v1.1.
 
         Weights search order
         --------------------
@@ -178,13 +177,14 @@ class InstantMeshModel(BaseAvatarModel):
         2. Any sub-dir of model_cache/instantmesh/ that has model_index.json
         3. Download sudo-ai/zero123plus-v1.1 into model_cache/instantmesh/zero123plus-v1.1/
 
-        Pipeline .py file search order (local-first, HF repo-id fallback)
-        ------------------------------------------------------------------
+        Pipeline .py file search order
+        -------------------------------
         A. repos/InstantMesh/zero123plus/pipeline_zero123plus.py
         B. <weights_dir>/pipeline_zero123plus.py
         C. model_cache/zero123plus/pipeline_zero123plus.py  (standalone model)
         D. Recursive glob under <weights_dir>
-        E. HF repo-id "sudo-ai/zero123plus-v1.1"  (diffusers fetches & caches it)
+        E. Download pipeline_zero123plus.py from sudo-ai/zero123plus-v1.1 into
+           <weights_dir>/pipeline_zero123plus.py  (last resort)
         """
         from app.core.config import settings
 
@@ -209,19 +209,13 @@ class InstantMeshModel(BaseAvatarModel):
             self.logger.info("Zero123++ pipeline .py (found by search): %s", found)
             return weights_dir, str(found)
 
-        # Last resort: let diffusers download the pipeline class from HuggingFace
-        # and cache it in its own cache directory (~/.cache/huggingface/).
-        hf_pipeline_id = "sudo-ai/zero123plus-v1.1"
-        self.logger.warning(
-            "pipeline_zero123plus.py not found locally "
-            "(searched %s and recursively under %s). "
-            "Falling back to HuggingFace repo-id '%s' — diffusers will "
-            "download and cache the pipeline class.",
-            [str(c) for c in local_candidates],
-            weights_dir,
-            hf_pipeline_id,
-        )
-        return weights_dir, hf_pipeline_id
+        # Last resort: download just the .py file from HuggingFace.
+        # NOTE: passing the HF repo-id to diffusers does NOT work here because
+        # diffusers looks for "pipeline.py" in the repo, not
+        # "pipeline_zero123plus.py".  We must have a local .py file.
+        pipeline_target = weights_dir / "pipeline_zero123plus.py"
+        self._download_pipeline_py(pipeline_target)
+        return weights_dir, str(pipeline_target)
 
     def _find_weights(self, settings) -> Path:
         """Locate or download Zero123++ weights; return a valid weights Path."""
@@ -271,6 +265,37 @@ class InstantMeshModel(BaseAvatarModel):
                 "Either download the zero123plus model first via POST /api/v1/models/zero123plus/download,\n"
                 "or set HF_TOKEN if the repo requires authentication."
             ) from exc
+
+    def _download_pipeline_py(self, target: Path) -> None:
+        """
+        Download only ``pipeline_zero123plus.py`` from sudo-ai/zero123plus-v1.1
+        into ``target``.  This is the fallback when the file is not already
+        present in any of the searched local directories.
+
+        We cannot use the HF repo-id shortcut with diffusers because diffusers
+        looks for ``pipeline.py`` (not ``pipeline_zero123plus.py``) in the repo.
+        """
+        from huggingface_hub import hf_hub_download
+
+        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
+        self.logger.info(
+            "pipeline_zero123plus.py not found locally — downloading from "
+            "sudo-ai/zero123plus-v1.1 to %s …", target
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        hf_hub_download(
+            repo_id="sudo-ai/zero123plus-v1.1",
+            filename="pipeline_zero123plus.py",
+            local_dir=str(target.parent),
+            local_dir_use_symlinks=False,
+            token=token,
+        )
+        if not target.is_file():
+            raise RuntimeError(
+                f"hf_hub_download completed but {target} is missing — "
+                "check disk permissions or HuggingFace availability."
+            )
+        self.logger.info("Downloaded pipeline_zero123plus.py → %s", target)
 
     # ------------------------------------------------------------------
     # Reconstruction helper
