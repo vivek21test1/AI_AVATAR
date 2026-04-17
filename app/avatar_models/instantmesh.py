@@ -7,18 +7,29 @@ Output  : High-quality textured 3D mesh (.obj + texture maps)
 Repo    : https://github.com/TencentARC/InstantMesh  (cloned to repos/InstantMesh/)
 
 Pipeline:
-  Stage 1 – Zero123++ generates 6 multi-view images from the input.
+  Stage 1 – Zero123++ v1.1 generates 6 multi-view images from the input.
   Stage 2 – InstantMesh LRM transformer + FlexiCubes reconstructs the mesh.
 
-Directory layout inside model_cache/instantmesh/ varies across HF repo
-revisions.  _find_mv_pipeline_dir() probes several strategies so the code
-works regardless of whether the sub-directory is named "zero123plus",
-"zero123plus-v1.1", or anything else.
+Note on weights layout
+----------------------
+TencentARC/InstantMesh on HuggingFace contains ONLY the mesh reconstruction
+checkpoints (instant-mesh-large.ckpt / instant-mesh-base.ckpt).  It does NOT
+include the Zero123++ diffusion pipeline.
+
+The Zero123++ weights are sourced in this priority order:
+  1. model_cache/zero123plus/        (reuse standalone zero123plus download)
+  2. model_cache/instantmesh/<dir>/  (any sub-directory with model_index.json)
+  3. Downloaded on-the-fly from sudo-ai/zero123plus-v1.1
+
+The custom pipeline code (pipeline_zero123plus.py) is taken from:
+  repos/InstantMesh/zero123plus/  when that directory exists (preferred),
+  otherwise from whichever weights directory is chosen above.
 """
 
+import os
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Tuple
 
 from PIL import Image
 
@@ -47,18 +58,24 @@ class InstantMeshModel(BaseAvatarModel):
             sys.path.insert(0, repo_str)
 
         # ── Stage 1: Zero123++ multi-view pipeline ────────────────────
-        mv_weights = self._find_mv_pipeline_dir()
-        self.logger.info(f"Loading Zero123++ pipeline from: {mv_weights}")
+        mv_weights, pipeline_code = self._resolve_zero123plus()
+        self.logger.info(
+            "Zero123++ weights : %s", mv_weights
+        )
+        self.logger.info(
+            "Zero123++ pipeline: %s", pipeline_code
+        )
 
         self._mv_pipeline = DiffusionPipeline.from_pretrained(
             str(mv_weights),
-            custom_pipeline=str(mv_weights),
+            custom_pipeline=str(pipeline_code),
             torch_dtype=torch.float16,
         )
         self._mv_pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
             self._mv_pipeline.scheduler.config, timestep_spacing="trailing"
         )
         self._mv_pipeline.to(self.device)
+        self.logger.info("Zero123++ pipeline loaded.")
 
         # ── Stage 2: InstantMesh reconstruction model ─────────────────
         cfg_candidates = list(self.repo_dir.glob("configs/*.yaml"))
@@ -78,6 +95,7 @@ class InstantMeshModel(BaseAvatarModel):
                     or next(Path(self.local_dir).glob("**/*.safetensors"), None)
                 )
                 if ckpt:
+                    self.logger.info("Loading InstantMesh checkpoint: %s", ckpt)
                     if str(ckpt).endswith(".safetensors"):
                         import safetensors.torch as st
                         state = st.load_file(str(ckpt))
@@ -89,14 +107,14 @@ class InstantMeshModel(BaseAvatarModel):
                 self.logger.info("InstantMesh reconstruction model loaded.")
             except Exception as exc:
                 self.logger.warning(
-                    f"Could not load reconstruction model ({exc}); "
-                    "will return multi-view images only."
+                    "Could not load reconstruction model (%s) — "
+                    "will return multi-view images only.", exc
                 )
                 self._mesh_model = None
         else:
             self.logger.warning(
                 "No YAML config found in repos/InstantMesh/configs/ — "
-                "reconstruction model skipped; multi-view output only."
+                "reconstruction skipped; multi-view output only."
             )
 
         self._model = self._mv_pipeline
@@ -113,8 +131,8 @@ class InstantMeshModel(BaseAvatarModel):
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
 
-        image        = Image.open(image_path).convert("RGB")
-        seed: int    = kwargs.get("seed", 42)
+        image         = Image.open(image_path).convert("RGB")
+        seed: int     = kwargs.get("seed", 42)
         mv_steps: int = kwargs.get("mv_steps", 75)
         use_texmap: bool = kwargs.get("export_texmap", True)
 
@@ -132,7 +150,7 @@ class InstantMeshModel(BaseAvatarModel):
             try:
                 output_files = self._reconstruct(mv_grid, out, use_texmap)
             except Exception as exc:
-                self.logger.warning(f"Reconstruction failed: {exc} — returning multi-view only")
+                self.logger.warning("Reconstruction failed: %s — returning multi-view only", exc)
                 output_files = [mv_path]
         else:
             self.logger.warning("Mesh model not loaded — returning multi-view only")
@@ -145,52 +163,93 @@ class InstantMeshModel(BaseAvatarModel):
         }
 
     # ------------------------------------------------------------------
-    # Helpers
+    # Zero123++ resolution
     # ------------------------------------------------------------------
 
-    def _find_mv_pipeline_dir(self) -> Path:
+    def _resolve_zero123plus(self) -> Tuple[Path, Path]:
         """
-        Locate the Zero123++ diffusion pipeline directory inside the downloaded
-        InstantMesh weights.  The sub-directory name varies across HF repo
-        revisions.  Strategies tried in order:
+        Return (weights_dir, pipeline_code_dir) for the Zero123++ stage.
 
-          1. Exact 'zero123plus/' sub-directory containing model_index.json
-          2. Any sub-directory matching 'zero123plus*' with model_index.json
-          3. Any sub-directory (one level deep) that contains model_index.json
-          4. model_cache/instantmesh/ itself (last resort — will fail with a
-             clear OSError from diffusers if model_index.json is missing)
+        Weights search order
+        --------------------
+        1. model_cache/zero123plus/           — reuse standalone download
+        2. Any sub-dir of model_cache/instantmesh/ that has model_index.json
+        3. Download sudo-ai/zero123plus-v1.1 into model_cache/instantmesh/zero123plus-v1.1/
+
+        Pipeline code search order
+        --------------------------
+        A. repos/InstantMesh/zero123plus/  (InstantMesh's version, preferred)
+        B. Same directory as weights       (HF snapshot includes pipeline_zero123plus.py)
         """
+        from app.core.config import settings
+
+        # ── locate weights ──────────────────────────────────────────
+        weights_dir: Path = self._find_weights(settings)
+
+        # ── locate pipeline code ────────────────────────────────────
+        repo_pipeline = self.repo_dir / "zero123plus"
+        if repo_pipeline.is_dir() and (repo_pipeline / "pipeline_zero123plus.py").exists():
+            pipeline_code = repo_pipeline
+        elif (weights_dir / "pipeline_zero123plus.py").exists():
+            pipeline_code = weights_dir
+        else:
+            # Fallback: diffusers will search the weights dir
+            pipeline_code = weights_dir
+
+        return weights_dir, pipeline_code
+
+    def _find_weights(self, settings) -> Path:
+        """Locate or download Zero123++ weights; return a valid weights Path."""
+
+        # Priority 1: reuse standalone zero123plus model if already downloaded
+        standalone = settings.MODEL_CACHE_DIR / "zero123plus"
+        if (standalone / "model_index.json").exists():
+            self.logger.info(
+                "Reusing model_cache/zero123plus/ for InstantMesh multi-view stage."
+            )
+            return standalone
+
+        # Priority 2: any sub-directory inside our own cache
         base = Path(self.local_dir)
+        if base.is_dir():
+            for sub in sorted(base.iterdir()):
+                if sub.is_dir() and (sub / "model_index.json").exists():
+                    self.logger.info(
+                        "Found Zero123++ weights in model_cache/instantmesh/%s/", sub.name
+                    )
+                    return sub
 
-        # Strategy 1: exact canonical name
-        exact = base / "zero123plus"
-        if exact.is_dir() and (exact / "model_index.json").exists():
-            return exact
+        # Priority 3: download zero123plus-v1.1 (the version InstantMesh was trained with)
+        target = base / "zero123plus-v1.1"
+        self._download_zero123plus(target)
+        return target
 
-        # Strategy 2: zero123plus* glob (handles zero123plus-v1.1, zero123plus-v2 …)
-        for candidate in sorted(base.glob("zero123plus*")):
-            if candidate.is_dir() and (candidate / "model_index.json").exists():
-                self.logger.info(
-                    f"Found Zero123++ pipeline in '{candidate.name}' "
-                    f"(not the expected 'zero123plus')"
-                )
-                return candidate
+    def _download_zero123plus(self, target: Path) -> None:
+        from huggingface_hub import snapshot_download
+        from huggingface_hub.utils import RepositoryNotFoundError
 
-        # Strategy 3: any immediate sub-directory with model_index.json
-        for sub in sorted(base.iterdir()):
-            if sub.is_dir() and (sub / "model_index.json").exists():
-                self.logger.info(
-                    f"Found diffusion pipeline in sub-directory '{sub.name}'"
-                )
-                return sub
-
-        # Strategy 4: root itself (let diffusers raise a meaningful error)
-        self.logger.warning(
-            f"No sub-directory with model_index.json found under {base}. "
-            "Falling back to the root weights directory — this will likely "
-            "fail.  Check the actual layout with: ls -la /data/model_cache/instantmesh/"
+        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
+        self.logger.info(
+            "Zero123++ weights not found — downloading sudo-ai/zero123plus-v1.1 to %s …", target
         )
-        return base
+        target.mkdir(parents=True, exist_ok=True)
+        try:
+            snapshot_download(
+                repo_id="sudo-ai/zero123plus-v1.1",
+                local_dir=str(target),
+                local_dir_use_symlinks=False,
+                token=token,
+            )
+        except RepositoryNotFoundError as exc:
+            raise RuntimeError(
+                "Could not download sudo-ai/zero123plus-v1.1 from HuggingFace.\n"
+                "Either download the zero123plus model first via POST /api/v1/models/zero123plus/download,\n"
+                "or set HF_TOKEN if the repo requires authentication."
+            ) from exc
+
+    # ------------------------------------------------------------------
+    # Reconstruction helper
+    # ------------------------------------------------------------------
 
     def _reconstruct(self, mv_grid: Image.Image, out: Path, use_texmap: bool) -> List[str]:
         import torch
